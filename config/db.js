@@ -5,16 +5,10 @@ dotenv.config();
 
 let pool;
 
-const dbUri = process.env.MYSQL_URL || process.env.MYSQL_PUBLIC_URL || process.env.DATABASE_URL;
+const dbUri = process.env.MYSQL_PUBLIC_URL || process.env.MYSQL_URL || process.env.DATABASE_URL;
 
 if (dbUri) {
-  pool = mysql.createPool({
-    uri: dbUri,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    ssl: { rejectUnauthorized: false }
-  });
+  pool = mysql.createPool(dbUri);
   console.log('Menggunakan DB URI Connection String (Railway/Production)');
 } else {
   pool = mysql.createPool({
