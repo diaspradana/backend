@@ -19,6 +19,10 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/warga', wargaRoutes);
 
+app.get('/', (req, res) => {
+  res.send('API RT RW RUNNING 🚀');
+});
+
 // Detailed error handling for unhandled routes
 app.use((req, res, next) => {
   res.status(404).json({ message: 'Endpoint not found' });

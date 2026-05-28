@@ -3,7 +3,46 @@ const bcrypt = require('bcryptjs');
 
 // Auto-migrate warga table
 pool.query('ALTER TABLE warga ADD COLUMN username VARCHAR(50) UNIQUE').catch(() => {});
+
+// Auto-migrate iuran table to make id_warga nullable for general income
+pool.query('ALTER TABLE iuran MODIFY COLUMN id_warga INT NULL').catch((err) => {
+  console.log('Migration info: iuran id_warga modify or error:', err.message);
+});
+
 pool.query('ALTER TABLE users ADD COLUMN password_plain VARCHAR(255)').catch(() => {});
+
+// Auto-migrate users role to include rt and rw
+pool.query(`ALTER TABLE users MODIFY COLUMN role ENUM('admin', 'warga', 'rt', 'rw') NOT NULL`).catch((err) => {
+  console.log('Migration info: users table already updated or error:', err.message);
+});
+
+// Auto-migrate pengeluaran table to include status
+pool.query(`ALTER TABLE pengeluaran ADD COLUMN status ENUM('menunggu_rt', 'menunggu_rw', 'disetujui', 'ditolak_rt', 'ditolak_rw') NOT NULL DEFAULT 'menunggu_rt'`).then(async () => {
+  // If we successfully added the status column, set all existing records to 'disetujui' so they are not treated as pending
+  await pool.query("UPDATE pengeluaran SET status = 'disetujui'").catch(() => {});
+}).catch((err) => {
+  console.log('Migration info: pengeluaran table already has status or error:', err.message);
+});
+
+// Auto-seed ketua_rt and ketua_rw accounts
+const seedApproverUsers = async () => {
+  try {
+    const salt = await bcrypt.genSalt(10);
+    const hashedPw = await bcrypt.hash('password123', salt);
+    await pool.query(
+      'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
+      ['ketua_rt', hashedPw, 'password123', 'rt']
+    );
+    await pool.query(
+      'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
+      ['ketua_rw', hashedPw, 'password123', 'rw']
+    );
+  } catch (err) {
+    console.error('Error auto-seeding approver users:', err);
+  }
+};
+// Run seed function after a short delay to ensure db is ready
+setTimeout(seedApproverUsers, 1000);
 
 // Auto-migrate tagihan_berkala table
 pool.query(`
@@ -24,16 +63,25 @@ pool.query(`
 exports.getDashboardSummary = async (req, res) => {
   try {
     const [wargaCount] = await pool.query('SELECT COUNT(*) as total FROM warga');
-    const [totalIuran] = await pool.query('SELECT SUM(jumlah) as total FROM iuran');
-    const [totalPengeluaran] = await pool.query('SELECT SUM(jumlah) as total FROM pengeluaran');
+    // Iuran warga: hanya yang terkait dengan warga (id_warga IS NOT NULL)
+    const [totalIuranWarga] = await pool.query('SELECT SUM(jumlah) as total FROM iuran WHERE id_warga IS NOT NULL');
+    // Pemasukan umum: entri tanpa id_warga (pemasukan non-iuran)
+    const [totalPemasukanUmum] = await pool.query('SELECT SUM(jumlah) as total FROM iuran WHERE id_warga IS NULL');
+    // Pengeluaran yang telah disetujui penuh (status disetujui)
+    const [totalPengeluaran] = await pool.query("SELECT SUM(jumlah) as total FROM pengeluaran WHERE status = 'disetujui'");
 
-    const iuran = totalIuran[0].total || 0;
-    const pengeluaran = totalPengeluaran[0].total || 0;
-    const saldo = iuran - pengeluaran;
+    const iuranWarga = parseFloat(totalIuranWarga[0].total || 0);
+    const pemasukanUmum = parseFloat(totalPemasukanUmum[0].total || 0);
+    const totalIuran = iuranWarga + pemasukanUmum; // total semua pemasukan
+    const pengeluaran = parseFloat(totalPengeluaran[0].total || 0);
+    // Saldo KAS = (Iuran Warga + Pemasukan Umum) - Pengeluaran Disetujui
+    const saldo = totalIuran - pengeluaran;
 
     res.json({
       totalWarga: wargaCount[0].total,
-      totalIuran: iuran,
+      totalIuran: totalIuran,         // total semua pemasukan
+      totalIuranWarga: iuranWarga,    // hanya iuran warga
+      totalPemasukanUmum: pemasukanUmum, // hanya pemasukan umum
       totalPengeluaran: pengeluaran,
       saldoKas: saldo
     });
@@ -52,15 +100,15 @@ exports.getDashboardCharts = async (req, res) => {
 
     if (period === 'yearly') {
       iuranQuery = 'SELECT YEAR(tanggal) as label, SUM(jumlah) as total FROM iuran GROUP BY YEAR(tanggal) ORDER BY label ASC LIMIT 5';
-      pengeluaranQuery = 'SELECT YEAR(tanggal) as label, SUM(jumlah) as total FROM pengeluaran GROUP BY YEAR(tanggal) ORDER BY label ASC LIMIT 5';
+      pengeluaranQuery = "SELECT YEAR(tanggal) as label, SUM(jumlah) as total FROM pengeluaran WHERE status = 'disetujui' GROUP BY YEAR(tanggal) ORDER BY label ASC LIMIT 5";
     } else if (period === 'monthly') {
       // Get data for current year months
       iuranQuery = 'SELECT MONTH(tanggal) as label, SUM(jumlah) as total FROM iuran WHERE YEAR(tanggal) = YEAR(CURRENT_DATE()) GROUP BY MONTH(tanggal) ORDER BY label ASC';
-      pengeluaranQuery = 'SELECT MONTH(tanggal) as label, SUM(jumlah) as total FROM pengeluaran WHERE YEAR(tanggal) = YEAR(CURRENT_DATE()) GROUP BY MONTH(tanggal) ORDER BY label ASC';
+      pengeluaranQuery = "SELECT MONTH(tanggal) as label, SUM(jumlah) as total FROM pengeluaran WHERE status = 'disetujui' AND YEAR(tanggal) = YEAR(CURRENT_DATE()) GROUP BY MONTH(tanggal) ORDER BY label ASC";
     } else { // weekly by default
       // For simplicity, we just taking last 7 records or grouping by day for current week
       iuranQuery = 'SELECT DAYNAME(tanggal) as label, SUM(jumlah) as total FROM iuran WHERE YEARWEEK(tanggal, 1) = YEARWEEK(CURRENT_DATE(), 1) GROUP BY DAYNAME(tanggal), DAYOFWEEK(tanggal) ORDER BY DAYOFWEEK(tanggal) ASC';
-      pengeluaranQuery = 'SELECT DAYNAME(tanggal) as label, SUM(jumlah) as total FROM pengeluaran WHERE YEARWEEK(tanggal, 1) = YEARWEEK(CURRENT_DATE(), 1) GROUP BY DAYNAME(tanggal), DAYOFWEEK(tanggal) ORDER BY DAYOFWEEK(tanggal) ASC';
+      pengeluaranQuery = "SELECT DAYNAME(tanggal) as label, SUM(jumlah) as total FROM pengeluaran WHERE status = 'disetujui' AND YEARWEEK(tanggal, 1) = YEARWEEK(CURRENT_DATE(), 1) GROUP BY DAYNAME(tanggal), DAYOFWEEK(tanggal) ORDER BY DAYOFWEEK(tanggal) ASC";
     }
 
     const [iuranData] = await pool.query(iuranQuery);
@@ -255,12 +303,76 @@ exports.getIuranList = async (req, res) => {
     const [iuran] = await pool.query(
       `SELECT i.*, w.nama, w.nik, w.no_hp, w.alamat 
        FROM iuran i 
-       JOIN warga w ON i.id_warga = w.id 
+       LEFT JOIN warga w ON i.id_warga = w.id 
        ORDER BY i.tanggal DESC, i.id DESC`
     );
     res.json(iuran);
   } catch (error) {
     console.error('Error fetching iuran list:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.addIuran = async (req, res) => {
+  const { id_warga, jumlah, tanggal, keterangan } = req.body;
+  try {
+    if (!jumlah || !tanggal) {
+      return res.status(400).json({ message: 'Jumlah dan tanggal wajib diisi' });
+    }
+    const [result] = await pool.query(
+      'INSERT INTO iuran (id_warga, jumlah, tanggal, keterangan) VALUES (?, ?, ?, ?)',
+      [id_warga || null, jumlah, tanggal, keterangan || null]
+    );
+    res.status(201).json({ message: 'Pemasukan berhasil ditambahkan', id: result.insertId });
+  } catch (error) {
+    console.error('Error adding iuran:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.updateIuran = async (req, res) => {
+  const { id } = req.params;
+  const { id_warga, jumlah, tanggal, keterangan } = req.body;
+  try {
+    if (!jumlah || !tanggal) {
+      return res.status(400).json({ message: 'Jumlah dan tanggal wajib diisi' });
+    }
+    // Check if system locked
+    const [rows] = await pool.query('SELECT keterangan FROM iuran WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Pemasukan tidak ditemukan' });
+    }
+    if (rows[0].keterangan && rows[0].keterangan.includes('Iuran Berkala Bulan')) {
+      return res.status(400).json({ message: 'Pemasukan otomatis sistem tidak dapat diubah' });
+    }
+
+    await pool.query(
+      'UPDATE iuran SET id_warga = ?, jumlah = ?, tanggal = ?, keterangan = ? WHERE id = ?',
+      [id_warga || null, jumlah, tanggal, keterangan || null, id]
+    );
+    res.json({ message: 'Pemasukan berhasil diperbarui' });
+  } catch (error) {
+    console.error('Error updating iuran:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.deleteIuran = async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Check if system locked
+    const [rows] = await pool.query('SELECT keterangan FROM iuran WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Pemasukan tidak ditemukan' });
+    }
+    if (rows[0].keterangan && rows[0].keterangan.includes('Iuran Berkala Bulan')) {
+      return res.status(400).json({ message: 'Pemasukan otomatis sistem tidak dapat dihapus' });
+    }
+
+    await pool.query('DELETE FROM iuran WHERE id = ?', [id]);
+    res.json({ message: 'Pemasukan berhasil dihapus' });
+  } catch (error) {
+    console.error('Error deleting iuran:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };
@@ -284,10 +396,10 @@ exports.addPengeluaran = async (req, res) => {
       return res.status(400).json({ message: 'Jumlah and tanggal are required' });
     }
     const [result] = await pool.query(
-      'INSERT INTO pengeluaran (jumlah, tanggal, keterangan) VALUES (?, ?, ?)',
+      "INSERT INTO pengeluaran (jumlah, tanggal, keterangan, status) VALUES (?, ?, ?, 'menunggu_rt')",
       [jumlah, tanggal, keterangan || null]
     );
-    res.status(201).json({ message: 'Pengeluaran added successfully', id: result.insertId });
+    res.status(201).json({ message: 'Pengajuan dana berhasil ditambahkan', id: result.insertId });
   } catch (error) {
     console.error('Error adding pengeluaran:', error);
     res.status(500).json({ message: 'Internal server error' });
@@ -302,13 +414,13 @@ exports.updatePengeluaran = async (req, res) => {
       return res.status(400).json({ message: 'Jumlah and tanggal are required' });
     }
     const [result] = await pool.query(
-      'UPDATE pengeluaran SET jumlah = ?, tanggal = ?, keterangan = ? WHERE id = ?',
+      "UPDATE pengeluaran SET jumlah = ?, tanggal = ?, keterangan = ?, status = 'menunggu_rt' WHERE id = ?",
       [jumlah, tanggal, keterangan || null, id]
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: 'Pengeluaran not found' });
     }
-    res.json({ message: 'Pengeluaran updated successfully' });
+    res.json({ message: 'Pengajuan dana berhasil diperbarui dan dikirim ulang untuk persetujuan' });
   } catch (error) {
     console.error('Error updating pengeluaran:', error);
     res.status(500).json({ message: 'Internal server error' });
@@ -325,6 +437,107 @@ exports.deletePengeluaran = async (req, res) => {
     res.json({ message: 'Pengeluaran deleted successfully' });
   } catch (error) {
     console.error('Error deleting pengeluaran:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.getPendingPengajuanDana = async (req, res) => {
+  const { role } = req.query; // 'rt' or 'rw'
+  try {
+    if (!role) {
+      return res.status(400).json({ message: 'Role is required' });
+    }
+
+    let status = '';
+    if (role === 'rt') status = 'menunggu_rt';
+    else if (role === 'rw') status = 'menunggu_rw';
+    else {
+      return res.status(400).json({ message: 'Invalid role for pending fund requests' });
+    }
+
+    const [pengajuan] = await pool.query(
+      'SELECT * FROM pengeluaran WHERE status = ? ORDER BY tanggal DESC, id DESC',
+      [status]
+    );
+    res.json(pengajuan);
+  } catch (error) {
+    console.error('Error fetching pending pengajuan dana:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.approvePengajuanDana = async (req, res) => {
+  const { id } = req.params;
+  const { role } = req.body;
+  try {
+    if (!role) {
+      return res.status(400).json({ message: 'Role is required' });
+    }
+
+    const [rows] = await pool.query('SELECT status FROM pengeluaran WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Pengajuan dana tidak ditemukan' });
+    }
+
+    const currentStatus = rows[0].status;
+    let nextStatus = '';
+
+    if (role === 'rt') {
+      if (currentStatus !== 'menunggu_rt') {
+        return res.status(400).json({ message: 'Status pengajuan tidak valid untuk disetujui oleh RT' });
+      }
+      nextStatus = 'menunggu_rw';
+    } else if (role === 'rw') {
+      if (currentStatus !== 'menunggu_rw') {
+        return res.status(400).json({ message: 'Status pengajuan tidak valid untuk disetujui oleh RW' });
+      }
+      nextStatus = 'disetujui';
+    } else {
+      return res.status(400).json({ message: 'Role tidak memiliki izin persetujuan' });
+    }
+
+    await pool.query('UPDATE pengeluaran SET status = ? WHERE id = ?', [nextStatus, id]);
+    res.json({ message: 'Pengajuan dana berhasil disetujui', status: nextStatus });
+  } catch (error) {
+    console.error('Error approving pengajuan dana:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.rejectPengajuanDana = async (req, res) => {
+  const { id } = req.params;
+  const { role } = req.body;
+  try {
+    if (!role) {
+      return res.status(400).json({ message: 'Role is required' });
+    }
+
+    const [rows] = await pool.query('SELECT status FROM pengeluaran WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Pengajuan dana tidak ditemukan' });
+    }
+
+    const currentStatus = rows[0].status;
+    let nextStatus = '';
+
+    if (role === 'rt') {
+      if (currentStatus !== 'menunggu_rt') {
+        return res.status(400).json({ message: 'Status pengajuan tidak valid untuk ditolak oleh RT' });
+      }
+      nextStatus = 'ditolak_rt';
+    } else if (role === 'rw') {
+      if (currentStatus !== 'menunggu_rw') {
+        return res.status(400).json({ message: 'Status pengajuan tidak valid untuk ditolak oleh RW' });
+      }
+      nextStatus = 'ditolak_rw';
+    } else {
+      return res.status(400).json({ message: 'Role tidak memiliki izin persetujuan' });
+    }
+
+    await pool.query('UPDATE pengeluaran SET status = ? WHERE id = ?', [nextStatus, id]);
+    res.json({ message: 'Pengajuan dana berhasil ditolak', status: nextStatus });
+  } catch (error) {
+    console.error('Error rejecting pengajuan dana:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

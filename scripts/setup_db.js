@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const bcrypt = require('bcryptjs');
 
 async function setupDatabase() {
   try {
@@ -10,6 +11,7 @@ async function setupDatabase() {
         nik VARCHAR(20) NOT NULL,
         alamat TEXT,
         no_hp VARCHAR(20),
+        username VARCHAR(50) UNIQUE DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -34,6 +36,7 @@ async function setupDatabase() {
         jumlah DECIMAL(15,2) NOT NULL,
         tanggal DATE NOT NULL,
         keterangan VARCHAR(255),
+        status ENUM('menunggu_rt', 'menunggu_rw', 'disetujui', 'ditolak_rt', 'ditolak_rw') NOT NULL DEFAULT 'menunggu_rt',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -70,16 +73,29 @@ async function setupDatabase() {
 
       // Insert dummy pengeluaran
       await pool.query(`
-        INSERT INTO pengeluaran (jumlah, tanggal, keterangan) VALUES 
-        (100000, ?, 'Bayar Satpam'),
-        (30000, ?, 'Beli Sapu dan Trashbag'),
-        (50000, ?, 'Perbaikan Lampu Jalan')
+        INSERT INTO pengeluaran (jumlah, tanggal, keterangan, status) VALUES 
+        (100000, ?, 'Bayar Satpam', 'disetujui'),
+        (30000, ?, 'Beli Sapu dan Trashbag', 'disetujui'),
+        (50000, ?, 'Perbaikan Lampu Jalan', 'disetujui')
       `, [thisMonth, thisMonth, lastMonth]);
 
       console.log('Seeding complete.');
     } else {
       console.log('Data already exists, skipping seed.');
     }
+
+    // Ensure Ketua RT and Ketua RW users are seeded
+    const salt = await bcrypt.genSalt(10);
+    const hashedPw = await bcrypt.hash('password123', salt);
+    
+    await pool.query(
+      'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
+      ['ketua_rt', hashedPw, 'password123', 'rt']
+    );
+    await pool.query(
+      'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
+      ['ketua_rw', hashedPw, 'password123', 'rw']
+    );
 
     console.log('Database setup complete.');
     process.exit(0);

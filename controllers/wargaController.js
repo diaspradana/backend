@@ -43,7 +43,7 @@ exports.getIuranList = async (req, res) => {
     const [iuran] = await pool.query(
       `SELECT i.*, w.nama, w.nik, w.no_hp, w.alamat 
        FROM iuran i 
-       JOIN warga w ON i.id_warga = w.id 
+       LEFT JOIN warga w ON i.id_warga = w.id 
        ORDER BY i.tanggal DESC, i.id DESC`
     );
     res.json(iuran);
@@ -56,7 +56,7 @@ exports.getIuranList = async (req, res) => {
 exports.getPengeluaranList = async (req, res) => {
   try {
     const [pengeluaran] = await pool.query(
-      'SELECT * FROM pengeluaran ORDER BY tanggal DESC, id DESC'
+      "SELECT * FROM pengeluaran WHERE status = 'disetujui' ORDER BY tanggal DESC, id DESC"
     );
     res.json(pengeluaran);
   } catch (error) {
@@ -68,7 +68,7 @@ exports.getPengeluaranList = async (req, res) => {
 exports.getKeuanganSummary = async (req, res) => {
   try {
     const [totalIuran] = await pool.query('SELECT SUM(jumlah) as total FROM iuran');
-    const [totalPengeluaran] = await pool.query('SELECT SUM(jumlah) as total FROM pengeluaran');
+    const [totalPengeluaran] = await pool.query("SELECT SUM(jumlah) as total FROM pengeluaran WHERE status = 'disetujui'");
 
     const iuran = parseFloat(totalIuran[0].total) || 0;
     const pengeluaran = parseFloat(totalPengeluaran[0].total) || 0;

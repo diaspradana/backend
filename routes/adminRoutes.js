@@ -16,9 +16,17 @@ router.put('/tagihan/:id/bayar', adminController.bayarTagihan);
 
 // Financial reports routes
 router.get('/iuran', adminController.getIuranList);
+router.post('/iuran', adminController.addIuran);
+router.put('/iuran/:id', adminController.updateIuran);
+router.delete('/iuran/:id', adminController.deleteIuran);
 router.get('/pengeluaran', adminController.getPengeluaranList);
 router.post('/pengeluaran', adminController.addPengeluaran);
 router.put('/pengeluaran/:id', adminController.updatePengeluaran);
 router.delete('/pengeluaran/:id', adminController.deletePengeluaran);
+
+// Fund Request Approval routes
+router.get('/pengajuan-dana/pending', adminController.getPendingPengajuanDana);
+router.put('/pengajuan-dana/:id/approve', adminController.approvePengajuanDana);
+router.put('/pengajuan-dana/:id/reject', adminController.rejectPengajuanDana);
 
 module.exports = router;
