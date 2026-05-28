@@ -3,6 +3,18 @@ const bcrypt = require('bcryptjs');
 
 async function setupDatabase() {
   try {
+    // 0. Create users table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(50) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        password_plain VARCHAR(255),
+        role ENUM('admin', 'warga', 'rt', 'rw') NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // 1. Create warga table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS warga (
@@ -20,7 +32,7 @@ async function setupDatabase() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS iuran (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        id_warga INT NOT NULL,
+        id_warga INT NULL,
         jumlah DECIMAL(15,2) NOT NULL,
         tanggal DATE NOT NULL,
         keterangan VARCHAR(255),
@@ -41,6 +53,22 @@ async function setupDatabase() {
       )
     `);
 
+    // 3.5 Create tagihan_berkala table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tagihan_berkala (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        id_warga INT NOT NULL,
+        bulan VARCHAR(7) NOT NULL,
+        jumlah DECIMAL(15,2) NOT NULL DEFAULT 50000.00,
+        status ENUM('lunas', 'belum_lunas') NOT NULL DEFAULT 'belum_lunas',
+        tanggal_bayar DATE DEFAULT NULL,
+        denda DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (id_warga) REFERENCES warga(id) ON DELETE CASCADE,
+        UNIQUE KEY unique_warga_bulan (id_warga, bulan)
+      )
+    `);
+
     // 4. Check if we need to seed data
     const [wargaRows] = await pool.query('SELECT COUNT(*) as count FROM warga');
     if (wargaRows[0].count === 0) {
@@ -48,10 +76,10 @@ async function setupDatabase() {
       
       // Insert dummy warga
       const [wargaResult] = await pool.query(`
-        INSERT INTO warga (nama, nik, alamat, no_hp) VALUES 
-        ('Budi Santoso', '3200111122223333', 'Jl. Merdeka No 1', '081234567890'),
-        ('Siti Aminah', '3200111122223334', 'Jl. Merdeka No 2', '081234567891'),
-        ('Agus Setiawan', '3200111122223335', 'Jl. Merdeka No 3', '081234567892')
+        INSERT INTO warga (nama, nik, alamat, no_hp, username) VALUES 
+        ('Budi Santoso', '3200111122223333', 'Jl. Merdeka No 1', '081234567890', 'warga_budi'),
+        ('Siti Aminah', '3200111122223334', 'Jl. Merdeka No 2', '081234567891', NULL),
+        ('Agus Setiawan', '3200111122223335', 'Jl. Merdeka No 3', '081234567892', NULL)
       `);
       
       const insertId = wargaResult.insertId;
@@ -84,10 +112,18 @@ async function setupDatabase() {
       console.log('Data already exists, skipping seed.');
     }
 
-    // Ensure Ketua RT and Ketua RW users are seeded
+    // Ensure all required default users are seeded
     const salt = await bcrypt.genSalt(10);
     const hashedPw = await bcrypt.hash('password123', salt);
     
+    await pool.query(
+      'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
+      ['admin_rt', hashedPw, 'password123', 'admin']
+    );
+    await pool.query(
+      'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
+      ['warga_budi', hashedPw, 'password123', 'warga']
+    );
     await pool.query(
       'INSERT IGNORE INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)',
       ['ketua_rt', hashedPw, 'password123', 'rt']
