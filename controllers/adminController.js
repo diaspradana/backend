@@ -138,20 +138,42 @@ exports.getWargaData = async (req, res) => {
 exports.addWarga = async (req, res) => {
   const { nama, nik, alamat, no_hp, username, password } = req.body;
   try {
-    if (!nama || !nik) {
-      return res.status(400).json({ message: 'Nama and NIK are required' });
+    // 4. Saat menambah warga, semua data wajib diisi dan tidak boleh ada kolom kosong.
+    if (!nama || !nama.trim() ||
+        !nik || !nik.trim() ||
+        !alamat || !alamat.trim() ||
+        !no_hp || !no_hp.trim() ||
+        !username || !username.trim() ||
+        !password || !password.trim()) {
+      return res.status(400).json({ message: 'Semua data warga wajib diisi dan tidak boleh ada kolom kosong' });
     }
 
-    if (username && password) {
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(password, salt);
-      // Create user
-      await pool.query('INSERT INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)', [username, hashedPassword, password, 'warga']);
+    // 2. NIK harus terdiri dari 16 digit angka dan harus gagal jika mengandung huruf.
+    const nikRegex = /^\d{16}$/;
+    if (!nikRegex.test(nik)) {
+      return res.status(400).json({ message: 'NIK harus terdiri dari 16 digit angka dan tidak boleh mengandung huruf/karakter lain' });
     }
+
+    // 1. NIK warga yang sudah terdaftar tidak boleh duplikat.
+    const [existingNik] = await pool.query('SELECT id FROM warga WHERE nik = ?', [nik]);
+    if (existingNik.length > 0) {
+      return res.status(400).json({ message: 'NIK sudah terdaftar untuk warga lain' });
+    }
+
+    // Check if username already exists in users
+    const [existingUser] = await pool.query('SELECT id FROM users WHERE username = ?', [username]);
+    if (existingUser.length > 0) {
+      return res.status(400).json({ message: 'Username sudah digunakan' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+    // Create user
+    await pool.query('INSERT INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)', [username, hashedPassword, password, 'warga']);
 
     const [result] = await pool.query(
       'INSERT INTO warga (nama, nik, alamat, no_hp, username) VALUES (?, ?, ?, ?, ?)', 
-      [nama, nik, alamat, no_hp, username || null]
+      [nama, nik, alamat, no_hp, username]
     );
     res.status(201).json({ message: 'Warga added successfully', id: result.insertId });
   } catch (error) {
@@ -164,19 +186,60 @@ exports.updateWarga = async (req, res) => {
   const { nik: nikParam } = req.params;
   const { nama, nik, alamat, no_hp, username, password } = req.body;
   try {
-    if (username && password) {
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(password, salt);
-      // Check if user exists
-      const [existing] = await pool.query('SELECT id FROM users WHERE username = ?', [username]);
-      if (existing.length > 0) {
-        await pool.query('UPDATE users SET password = ?, password_plain = ? WHERE username = ?', [hashedPassword, password, username]);
-      } else {
-        await pool.query('INSERT INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)', [username, hashedPassword, password, 'warga']);
+    if (!nama || !nama.trim() ||
+        !nik || !nik.trim() ||
+        !alamat || !alamat.trim() ||
+        !no_hp || !no_hp.trim() ||
+        !username || !username.trim()) {
+      return res.status(400).json({ message: 'Semua data wajib diisi (kecuali password baru)' });
+    }
+
+    // 2. NIK harus terdiri dari 16 digit angka dan harus gagal jika mengandung huruf.
+    const nikRegex = /^\d{16}$/;
+    if (!nikRegex.test(nik)) {
+      return res.status(400).json({ message: 'NIK harus terdiri dari 16 digit angka dan tidak boleh mengandung huruf/karakter lain' });
+    }
+
+    // 1. NIK warga yang sudah terdaftar tidak boleh duplikat (jika NIK diubah).
+    if (nik !== nikParam) {
+      const [existingNik] = await pool.query('SELECT id FROM warga WHERE nik = ?', [nik]);
+      if (existingNik.length > 0) {
+        return res.status(400).json({ message: 'NIK baru sudah terdaftar untuk warga lain' });
       }
     }
 
-    await pool.query('UPDATE warga SET nama=?, nik=?, alamat=?, no_hp=?, username=? WHERE nik=?', [nama, nik, alamat, no_hp, username || null, nikParam]);
+    // Check if username already exists for other users
+    const [wargaData] = await pool.query('SELECT username FROM warga WHERE nik=?', [nikParam]);
+    const oldUsername = wargaData.length > 0 ? wargaData[0].username : null;
+
+    if (username !== oldUsername) {
+      const [existingUser] = await pool.query('SELECT id FROM users WHERE username = ?', [username]);
+      if (existingUser.length > 0) {
+        return res.status(400).json({ message: 'Username sudah digunakan oleh user lain' });
+      }
+    }
+
+    // Update users table (if associated user exists)
+    if (oldUsername) {
+      if (password && password.trim()) {
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        await pool.query('UPDATE users SET username = ?, password = ?, password_plain = ? WHERE username = ?', [username, hashedPassword, password, oldUsername]);
+      } else {
+        await pool.query('UPDATE users SET username = ? WHERE username = ?', [username, oldUsername]);
+      }
+    } else {
+      // Create associated user if password is provided
+      if (password && password.trim()) {
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        await pool.query('INSERT INTO users (username, password, password_plain, role) VALUES (?, ?, ?, ?)', [username, hashedPassword, password, 'warga']);
+      } else {
+        return res.status(400).json({ message: 'Password wajib diisi untuk mengaktifkan akun login warga baru' });
+      }
+    }
+
+    await pool.query('UPDATE warga SET nama=?, nik=?, alamat=?, no_hp=?, username=? WHERE nik=?', [nama, nik, alamat, no_hp, username, nikParam]);
     res.json({ message: 'Warga updated successfully' });
   } catch (error) {
     console.error('Error updating warga:', error);
@@ -389,12 +452,34 @@ exports.getPengeluaranList = async (req, res) => {
   }
 };
 
+const getSaldoKas = async () => {
+  const [totalIuranWarga] = await pool.query('SELECT SUM(jumlah) as total FROM iuran WHERE id_warga IS NOT NULL');
+  const [totalPemasukanUmum] = await pool.query('SELECT SUM(jumlah) as total FROM iuran WHERE id_warga IS NULL');
+  const [totalPengeluaran] = await pool.query("SELECT SUM(jumlah) as total FROM pengeluaran WHERE status = 'disetujui'");
+
+  const iuranWarga = parseFloat(totalIuranWarga[0].total || 0);
+  const pemasukanUmum = parseFloat(totalPemasukanUmum[0].total || 0);
+  const totalIuran = iuranWarga + pemasukanUmum;
+  const pengeluaran = parseFloat(totalPengeluaran[0].total || 0);
+  return totalIuran - pengeluaran;
+};
+
 exports.addPengeluaran = async (req, res) => {
   const { jumlah, tanggal, keterangan } = req.body;
   try {
     if (!jumlah || !tanggal) {
       return res.status(400).json({ message: 'Jumlah and tanggal are required' });
     }
+
+    // 3. Pengajuan dana yang melebihi saldo harus ditolak dan minimal sisa saldo 5rb
+    const currentSaldo = await getSaldoKas();
+    const parsedJumlah = parseFloat(jumlah);
+    if (currentSaldo - parsedJumlah < 5000) {
+      return res.status(400).json({ 
+        message: `Pengajuan dana ditolak. Saldo kas tidak mencukupi (minimal sisa saldo Rp 5.000). Maksimal pengajuan saat ini: Rp ${(currentSaldo - 5000 > 0 ? currentSaldo - 5000 : 0).toLocaleString('id-ID')}` 
+      });
+    }
+
     const [result] = await pool.query(
       "INSERT INTO pengeluaran (jumlah, tanggal, keterangan, status) VALUES (?, ?, ?, 'menunggu_rt')",
       [jumlah, tanggal, keterangan || null]
@@ -413,6 +498,16 @@ exports.updatePengeluaran = async (req, res) => {
     if (!jumlah || !tanggal) {
       return res.status(400).json({ message: 'Jumlah and tanggal are required' });
     }
+
+    // 3. Pengajuan dana yang melebihi saldo harus ditolak dan minimal sisa saldo 5rb
+    const currentSaldo = await getSaldoKas();
+    const parsedJumlah = parseFloat(jumlah);
+    if (currentSaldo - parsedJumlah < 5000) {
+      return res.status(400).json({ 
+        message: `Pembaruan pengajuan dana ditolak. Saldo kas tidak mencukupi (minimal sisa saldo Rp 5.000). Maksimal pengajuan saat ini: Rp ${(currentSaldo - 5000 > 0 ? currentSaldo - 5000 : 0).toLocaleString('id-ID')}` 
+      });
+    }
+
     const [result] = await pool.query(
       "UPDATE pengeluaran SET jumlah = ?, tanggal = ?, keterangan = ?, status = 'menunggu_rt' WHERE id = ?",
       [jumlah, tanggal, keterangan || null, id]
@@ -474,12 +569,13 @@ exports.approvePengajuanDana = async (req, res) => {
       return res.status(400).json({ message: 'Role is required' });
     }
 
-    const [rows] = await pool.query('SELECT status FROM pengeluaran WHERE id = ?', [id]);
+    const [rows] = await pool.query('SELECT status, jumlah FROM pengeluaran WHERE id = ?', [id]);
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Pengajuan dana tidak ditemukan' });
     }
 
     const currentStatus = rows[0].status;
+    const jumlah = parseFloat(rows[0].jumlah);
     let nextStatus = '';
 
     if (role === 'rt') {
@@ -494,6 +590,18 @@ exports.approvePengajuanDana = async (req, res) => {
       nextStatus = 'disetujui';
     } else {
       return res.status(400).json({ message: 'Role tidak memiliki izin persetujuan' });
+    }
+
+    // 3. Pengajuan dana yang melebihi saldo harus ditolak dan minimal sisa saldo 5rb
+    if (nextStatus === 'disetujui') {
+      const currentSaldo = await getSaldoKas();
+      if (currentSaldo - jumlah < 5000) {
+        // Auto-reject the request
+        await pool.query("UPDATE pengeluaran SET status = 'ditolak_rw' WHERE id = ?", [id]);
+        return res.status(400).json({ 
+          message: `Persetujuan ditolak. Saldo kas tidak mencukupi (minimal sisa saldo Rp 5.000). Status pengajuan otomatis diubah menjadi ditolak.` 
+        });
+      }
     }
 
     await pool.query('UPDATE pengeluaran SET status = ? WHERE id = ?', [nextStatus, id]);
